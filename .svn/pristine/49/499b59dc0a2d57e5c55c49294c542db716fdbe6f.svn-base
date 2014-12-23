@@ -1,0 +1,79 @@
+package ca.ubc.cpsc210.waldo.waldowebservice;
+
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.json.JSONTokener;
+
+import ca.ubc.cpsc210.waldo.exceptions.WaldoException;
+import ca.ubc.cpsc210.waldo.model.Waldo;
+import ca.ubc.cpsc210.waldo.util.LatLon;
+
+public class WaldoService {
+
+	private final static String WALDO_WEB_SERVICE_URL = "http://kramer.nss.cs.ubc.ca:8080/";
+
+	/**
+	 * Constructor
+	 */
+	public WaldoService() {
+	}
+
+	/**
+	 * Initialize a session with the Waldo web service. The session can time out
+	 * even while the app is active...
+	 * 
+	 * @param nameToUse
+	 *            The name to go register, can be null if you want Waldo to
+	 *            generate a name
+	 * @return The name that Waldo gave you
+	 */
+	public String initSession(String nameToUse) {
+		// CPSC 210 Students. You will need to complete this method
+		return null;
+	}
+
+	/**
+	 * Get waldos from the Waldo web service.
+	 * 
+	 * @param numberToGenerate
+	 *            The number of Waldos to try to retrieve
+	 * @return Waldo objects based on information returned from the Waldo web
+	 *         service
+	 */
+	public List<Waldo> getRandomWaldos(int numberToGenerate) {
+		// CPSC 210 Students: You will need to complete this method
+		return null;
+	}
+
+	/**
+	 * Return the current list of Waldos that have been retrieved
+	 * 
+	 * @return The current Waldos
+	 */
+	public List<Waldo> getWaldos() {
+		// CPSC 210 Students: You will need to complete this method
+		return null;
+	}
+
+	/**
+	 * Retrieve messages available for the user from the Waldo web service
+	 * 
+	 * @return A list of messages
+	 */
+	public List<String> getMessages() {
+		// CPSC 210 Students: You will need to complete this method
+		return null;
+	}
+
+	
+}

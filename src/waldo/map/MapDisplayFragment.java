@@ -1,0 +1,1018 @@
+package waldo.map;
+
+import java.text.SimpleDateFormat;
+
+
+import java.util.AbstractList;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+import org.osmdroid.DefaultResourceProxyImpl;
+import org.osmdroid.ResourceProxy;
+import org.osmdroid.api.IGeoPoint;
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
+import org.osmdroid.util.GeoPoint;
+import org.osmdroid.views.MapController;
+import org.osmdroid.views.MapView;
+import org.osmdroid.views.overlay.ItemizedIconOverlay;
+import org.osmdroid.views.overlay.ItemizedIconOverlay.OnItemGestureListener;
+import org.osmdroid.views.overlay.Overlay;
+import org.osmdroid.views.overlay.OverlayItem;
+import org.osmdroid.views.overlay.OverlayManager;
+import org.osmdroid.views.overlay.PathOverlay;
+import org.osmdroid.views.overlay.SimpleLocationOverlay;
+
+import android.app.AlertDialog;
+import android.app.ProgressDialog;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.content.DialogInterface.OnClickListener;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Paint.Style;
+import android.location.Criteria;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.os.AsyncTask;
+import android.os.Bundle;
+import android.os.IBinder;
+import android.preference.PreferenceManager;
+import android.support.v4.app.Fragment;
+import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import waldo.R;
+import waldo.model.Bus;
+import waldo.model.BusRoute;
+import waldo.model.BusStop;
+import waldo.model.Trip;
+import waldo.model.Waldo;
+import waldo.translink.TranslinkService;
+import waldo.util.LatLon;
+import waldo.util.Segment;
+import waldo.waldowebservice.WaldoService;
+import android.provider.Settings;
+
+/**
+ * Fragment holding the map in the UI.
+ */
+
+public class MapDisplayFragment extends Fragment {
+
+	/**
+	 * Log tag for LogCat messages
+	 */
+	private final static String LOG_TAG = "MapDisplayFragment";
+
+	/**
+	 * Location of some points in lat/lon for testing and for centering the map
+	 */
+	private final static GeoPoint ICICS = new GeoPoint(49.261182, -123.2488201);
+	private final static GeoPoint CENTERMAP = ICICS;
+
+	/**
+	 * Preference manager to access user preferences
+	 */
+	private SharedPreferences sharedPreferences;
+
+	/**
+	 * View that shows the map
+	 */
+	private MapView mapView;
+
+	/**
+	 * Map controller for zooming in/out, centering
+	 */
+	private MapController mapController;
+
+	// **************** Overlay fields **********************
+
+	/**
+	 * Overlay for the device user's current location.
+	 */
+	private SimpleLocationOverlay userLocationOverlay;
+
+	/**
+	 * Overlay for bus stop to board at
+	 */
+	private ItemizedIconOverlay<OverlayItem> busStopToBoardOverlay;
+
+	/**
+	 * Overlay for bus stop to disembark
+	 */
+	private ItemizedIconOverlay<OverlayItem> busStopToDisembarkOverlay;
+
+	/**
+	 * Overlay for Waldo
+	 */
+	private ItemizedIconOverlay<OverlayItem> waldosOverlay;
+
+	/**
+	 * Overlay for displaying bus routes
+	 */
+	private List<PathOverlay> routeOverlays;
+
+	/**
+	 * Selected bus stop on map
+	 */
+	private OverlayItem selectedStopOnMap;
+
+	/**
+	 * Bus selected by user
+	 */
+	private OverlayItem selectedBus;
+
+	// ******************* Application-specific *****************
+
+	/**
+	 * Wraps Translink web service
+	 */
+	private TranslinkService translinkService;
+
+	/**
+	 * Wraps Waldo web service
+	 */
+	private WaldoService waldoService;
+
+	/**
+	 * Waldo selected by user
+	 */
+	private Waldo selectedWaldo;
+
+	/**
+	 * The name the user goes by
+	 */
+	private String userName;
+
+	/**
+	 * LocationManager object
+	 */
+	private LocationManager locationManager;
+	/**
+	 * LocationListener object
+	 */
+	private LocationListener locationListener;
+
+	// ***************** Android hooks *********************
+
+	/**
+	 * Help initialize the state of the fragment
+	 */
+	@Override
+	public void onActivityCreated(Bundle savedInstanceState) {
+		super.onActivityCreated(savedInstanceState);
+		setHasOptionsMenu(true);
+
+		sharedPreferences = PreferenceManager
+				.getDefaultSharedPreferences(getActivity());
+
+		initializeWaldo();
+		waldoService = new WaldoService();
+		translinkService = new TranslinkService();
+		routeOverlays = new ArrayList<PathOverlay>();
+
+		// Acquire a reference to the system Location Manager
+		locationManager = (LocationManager) getActivity().getSystemService(Context.LOCATION_SERVICE);
+		// Register the listener with the Location Manager to receive location updates
+		locationListener = new GPSTracker();
+		locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, locationListener);
+	}
+
+	/**
+	 * Initialize the Waldo web service
+	 */
+	private void initializeWaldo() {
+		String s = null;
+		new InitWaldo().execute(s);
+	}
+
+	/**
+	 * Set up map view with overlays for buses, selected bus stop, bus route and
+	 * current location.
+	 */
+	@Override
+	public View onCreateView(LayoutInflater inflater, ViewGroup container,
+			Bundle savedInstanceState) {
+		if (mapView == null) {
+			mapView = new MapView(getActivity(), null);
+
+			mapView.setTileSource(TileSourceFactory.MAPNIK);
+			mapView.setClickable(true);
+			mapView.setBuiltInZoomControls(true);
+
+			mapController = mapView.getController();
+			mapController.setZoom(mapView.getMaxZoomLevel() - 4);
+			mapController.setCenter(CENTERMAP);
+
+			userLocationOverlay = createLocationOverlay();
+			busStopToBoardOverlay = createBusStopToBoardOverlay();
+			busStopToDisembarkOverlay = createBusStopToDisembarkOverlay();
+			waldosOverlay = createWaldosOverlay();
+
+			// Order matters: overlays added later are displayed on top of
+			// overlays added earlier.
+			mapView.getOverlays().add(waldosOverlay);
+			mapView.getOverlays().add(busStopToBoardOverlay);
+			mapView.getOverlays().add(busStopToDisembarkOverlay);
+			mapView.getOverlays().add(userLocationOverlay);
+		}
+		return mapView;
+	}
+
+	/**
+	 * Helper to reset overlays
+	 */
+	private void resetOverlays() {
+		OverlayManager om = mapView.getOverlayManager();
+		om.clear();
+		om.addAll(routeOverlays);
+		om.add(busStopToBoardOverlay);
+		om.add(busStopToDisembarkOverlay);
+		om.add(userLocationOverlay);
+		om.add(waldosOverlay);
+	}
+
+	/**
+	 * Helper to clear overlays
+	 */
+	private void clearOverlays() {
+		waldosOverlay.removeAllItems();
+		clearAllOverlaysButWaldo();
+		OverlayManager om = mapView.getOverlayManager();
+		om.add(waldosOverlay);
+	}
+
+	/**
+	 * Helper to clear overlays, but leave Waldo overlay untouched
+	 */
+	private void clearAllOverlaysButWaldo() {
+		if (routeOverlays != null) {
+			routeOverlays.clear();
+			busStopToBoardOverlay.removeAllItems();
+			busStopToDisembarkOverlay.removeAllItems();
+
+			OverlayManager om = mapView.getOverlayManager();
+			om.clear();
+			om.addAll(routeOverlays);
+			om.add(busStopToBoardOverlay);
+			om.add(busStopToDisembarkOverlay);
+			om.add(userLocationOverlay);
+		}
+	}
+
+	/**
+	 * When view is destroyed, remove map view from its parent so that it can be
+	 * added again when view is re-created.
+	 */
+	@Override
+	public void onDestroyView() {
+		((ViewGroup) mapView.getParent()).removeView(mapView);
+		super.onDestroyView();
+	}
+
+	/**
+	 * Shut down the various services
+	 */
+	@Override
+	public void onDestroy() {
+		super.onDestroy();
+	}
+
+	/**
+	 * Update the overlay with user's current location. Request location
+	 * updates.
+	 */
+	@Override
+	public void onResume() {
+		initializeWaldo();
+		super.onResume();
+		// Listen for updates using locationListener object
+		locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, locationListener);
+	}
+
+	/**
+	 * Cancel location updates.
+	 */
+	@Override
+	public void onPause() {
+		super.onPause();
+		// Remove the listener you previously added
+		locationManager.removeUpdates(locationListener);
+	}
+
+	/**
+	 * Update the marker for the user's location and repaint.
+	 */
+	public void updateLocation(Location location) {
+		// plot the user based upon the appropriate coordinates
+		location = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+		GeoPoint userLocation = new GeoPoint(location);
+		if (userLocation != null) {
+		userLocationOverlay.setLocation(userLocation);
+		}
+		// mapView.invalidate is needed to redraw
+		// the map and should come at the end of the method.
+		mapView.invalidate();
+	}
+
+	/**
+	 * Save map's zoom level and centre.
+	 */
+	@Override
+	public void onSaveInstanceState(Bundle outState) {
+		super.onSaveInstanceState(outState);
+
+		if (mapView != null) {
+			outState.putInt("zoomLevel", mapView.getZoomLevel());
+			IGeoPoint cntr = mapView.getMapCenter();
+			outState.putInt("latE6", cntr.getLatitudeE6());
+			outState.putInt("lonE6", cntr.getLongitudeE6());
+		}
+	}
+
+	/**
+	 * Retrieve Waldos from the Waldo web service
+	 */
+	public void findWaldos() {
+		clearOverlays();
+		// Find out from the settings how many waldos to retrieve, default is 1
+		String numberOfWaldosAsString = sharedPreferences.getString(
+				"numberOfWaldos", "1");
+		int numberOfWaldos = Integer.valueOf(numberOfWaldosAsString);
+		new GetWaldoLocations().execute(numberOfWaldos);
+		mapView.invalidate();
+	}
+
+	/**
+	 * Clear waldos from view
+	 */
+	public void clearWaldos() {
+		clearOverlays();
+		mapView.invalidate();
+
+	}
+
+	// ******************** Overlay Creation ********************
+
+	/**
+	 * Create the overlay for bus stop to board at marker.
+	 */
+	private ItemizedIconOverlay<OverlayItem> createBusStopToBoardOverlay() {
+		ResourceProxy rp = new DefaultResourceProxyImpl(getActivity());
+
+		OnItemGestureListener<OverlayItem> gestureListener = new OnItemGestureListener<OverlayItem>() {
+
+			/**
+			 * Display bus stop description in dialog box when user taps stop.
+			 * 
+			 * @param index
+			 *            index of item tapped
+			 * @param oi
+			 *            the OverlayItem that was tapped
+			 * @return true to indicate that tap event has been handled
+			 */
+			@Override
+			public boolean onItemSingleTapUp(int index, OverlayItem oi) {
+
+				new AlertDialog.Builder(getActivity())
+				.setPositiveButton(R.string.ok, new OnClickListener() {
+					@Override
+					public void onClick(DialogInterface arg0, int arg1) {
+						if (selectedStopOnMap != null) {
+							selectedStopOnMap.setMarker(getResources()
+									.getDrawable(R.drawable.pin_blue));
+
+							mapView.invalidate();
+						}
+					}
+				}).setTitle(oi.getTitle()).setMessage(oi.getSnippet())
+				.show();
+
+				oi.setMarker(getResources().getDrawable(R.drawable.pin_blue));
+				selectedStopOnMap = oi;
+				mapView.invalidate();
+				return true;
+			}
+
+			@Override
+			public boolean onItemLongPress(int index, OverlayItem oi) {
+				// do nothing
+				return false;
+			}
+		};
+
+		return new ItemizedIconOverlay<OverlayItem>(
+				new ArrayList<OverlayItem>(), getResources().getDrawable(
+						R.drawable.pin_blue), gestureListener, rp);
+	}
+
+	/**
+	 * Create the overlay for bus stop to disembark at marker.
+	 */
+	private ItemizedIconOverlay<OverlayItem> createBusStopToDisembarkOverlay() {
+		ResourceProxy rp = new DefaultResourceProxyImpl(getActivity());
+
+		OnItemGestureListener<OverlayItem> gestureListener = new OnItemGestureListener<OverlayItem>() {
+
+			/**
+			 * Display bus stop description in dialog box when user taps stop.
+			 * 
+			 * @param index
+			 *            index of item tapped
+			 * @param oi
+			 *            the OverlayItem that was tapped
+			 * @return true to indicate that tap event has been handled
+			 */
+			@Override
+			public boolean onItemSingleTapUp(int index, OverlayItem oi) {
+
+				new AlertDialog.Builder(getActivity())
+				.setPositiveButton(R.string.ok, new OnClickListener() {
+					@Override
+					public void onClick(DialogInterface arg0, int arg1) {
+						if (selectedStopOnMap != null) {
+							selectedStopOnMap.setMarker(getResources()
+									.getDrawable(R.drawable.pin_blue));
+
+							mapView.invalidate();
+						}
+					}
+				}).setTitle(oi.getTitle()).setMessage(oi.getSnippet())
+				.show();
+
+				oi.setMarker(getResources().getDrawable(R.drawable.pin_blue));
+				selectedStopOnMap = oi;
+				mapView.invalidate();
+				return true;
+			}
+
+			@Override
+			public boolean onItemLongPress(int index, OverlayItem oi) {
+				// do nothing
+				return false;
+			}
+		};
+
+		return new ItemizedIconOverlay<OverlayItem>(
+				new ArrayList<OverlayItem>(), getResources().getDrawable(
+						R.drawable.pin_blue), gestureListener, rp);
+	}
+
+	/**
+	 * Create the overlay for Waldo markers.
+	 */
+	private ItemizedIconOverlay<OverlayItem> createWaldosOverlay() {
+		ResourceProxy rp = new DefaultResourceProxyImpl(getActivity());
+		OnItemGestureListener<OverlayItem> gestureListener = new OnItemGestureListener<OverlayItem>() {
+
+			/**
+			 * Display Waldo point description in dialog box when user taps
+			 * icon.
+			 * 
+			 * @param index
+			 *            index of item tapped
+			 * @param oi
+			 *            the OverlayItem that was tapped
+			 * @return true to indicate that tap event has been handled
+			 */
+			@Override
+			public boolean onItemSingleTapUp(int index, OverlayItem oi) {
+
+				selectedWaldo = waldoService.getWaldos().get(index);
+				Date lastSeen = selectedWaldo.getLastUpdated();
+				SimpleDateFormat dateTimeFormat = new SimpleDateFormat(
+						"MMM dd, hh:mmaa", Locale.CANADA);
+
+				new AlertDialog.Builder(getActivity())
+				.setPositiveButton(R.string.get_route,
+						new OnClickListener() {
+					@Override
+					public void onClick(DialogInterface arg0,
+							int arg1) {
+
+						// CPSC 210 STUDENTS. You must set
+						// currCoord to
+						// the user's current location.
+						LatLon currCoord = null;
+
+						// CPSC 210 Students: Set currCoord...
+
+						LatLon destCoord = selectedWaldo
+								.getLastLocation();
+
+						new GetRouteTask().execute(currCoord,
+								destCoord);
+
+					}
+				})
+				.setNegativeButton(R.string.ok, null)
+				.setTitle(selectedWaldo.getName())
+				.setMessage(
+						"Last seen  " + dateTimeFormat.format(lastSeen))
+						.show();
+
+				mapView.invalidate();
+				return true;
+			}
+
+			@Override
+			public boolean onItemLongPress(int index, OverlayItem oi) {
+				// do nothing
+				return false;
+			}
+		};
+
+		return new ItemizedIconOverlay<OverlayItem>(
+				new ArrayList<OverlayItem>(), getResources().getDrawable(
+						R.drawable.map_pin_thumb_blue), gestureListener, rp);
+	}
+
+	/**
+	 * Create overlay for a bus route.
+	 */
+	private PathOverlay createPathOverlay() {
+		PathOverlay po = new PathOverlay(Color.parseColor("#cf0c7f"),
+				getActivity());
+		Paint pathPaint = new Paint();
+		pathPaint.setColor(Color.parseColor("#cf0c7f"));
+		pathPaint.setStrokeWidth(4.0f);
+		pathPaint.setStyle(Style.STROKE);
+		po.setPaint(pathPaint);
+		return po;
+	}
+
+	/**
+	 * Create the overlay for the user's current location.
+	 */
+	private SimpleLocationOverlay createLocationOverlay() {
+		ResourceProxy rp = new DefaultResourceProxyImpl(getActivity());
+
+		return new SimpleLocationOverlay(getActivity(), rp) {
+			@Override
+			public boolean onLongPress(MotionEvent e, MapView mapView) {
+				new GetMessagesFromWaldo().execute();
+				return true;
+			}
+
+		};
+	}
+
+	/**
+	 * Plot endpoints
+	 */
+	private void plotEndPoints(Trip trip) {
+		GeoPoint pointStart = new GeoPoint(trip.getStart().getLatLon()
+				.getLatitude(), trip.getStart().getLatLon().getLongitude());
+
+		OverlayItem overlayItemStart = new OverlayItem(Integer.valueOf(
+				trip.getStart().getNumber()).toString(), trip.getStart()
+				.getDescriptionToDisplay(), pointStart);
+		GeoPoint pointEnd = new GeoPoint(trip.getEnd().getLatLon()
+				.getLatitude(), trip.getEnd().getLatLon().getLongitude());
+		OverlayItem overlayItemEnd = new OverlayItem(Integer.valueOf(
+				trip.getEnd().getNumber()).toString(), trip.getEnd()
+				.getDescriptionToDisplay(), pointEnd);
+		busStopToBoardOverlay.removeAllItems();
+		busStopToDisembarkOverlay.removeAllItems();
+
+		busStopToBoardOverlay.addItem(overlayItemStart);
+		busStopToDisembarkOverlay.addItem(overlayItemEnd);
+	}
+
+	/**
+	 * Plot bus route onto route overlays
+	 * 
+	 * @param rte
+	 *            : the bus route
+	 * @param start
+	 *            : location where the trip starts
+	 * @param end
+	 *            : location where the trip ends
+	 */
+
+	private void plotRoute(Trip trip) {
+		List<LatLon> latlons;
+		// Put up the end points
+		plotEndPoints(trip);
+		// Get the segments for the route
+		List<Segment> segments = trip.getRoute().getSegments();
+		// Create PathOverlay object and add it to routeOverlays
+		// if point of interest is between the start and the end point
+		for (Segment seg : segments) {
+			latlons = (List<LatLon>) seg.iterator();
+			PathOverlay pathOverlayObject = createPathOverlay();
+			for (LatLon pointOfInterest : latlons) {
+				if (LatLon.inbetween(pointOfInterest, trip.getStart().getLatLon(), trip.getEnd().getLatLon())) {
+					routeOverlays.add(pathOverlayObject);
+				} else
+					System.out.println("Sorry, point of interest is not between the start and end point");
+			}
+		}	
+		// Redraw the map
+		mapView.invalidate();
+	}
+
+	/**
+	 * Plot a Waldo point on the specified overlay.
+	 */
+
+	private void plotWaldos(List<Waldo> waldos) {
+		for (Waldo waldo : waldos) {
+			double latitude = waldo.getLastLocation().getLatitude();
+			double longitude = waldo.getLastLocation().getLongitude();
+			GeoPoint lastlocation = new GeoPoint(latitude,longitude);
+			String lastUpdated = waldo.getLastUpdated().toString();
+
+			OverlayItem oi = new OverlayItem(waldo.getName(), lastUpdated,  lastlocation);
+			waldosOverlay.addItem(oi);
+		}
+		// Redraw the map
+		mapView.invalidate();
+	}
+
+	/**
+	 * Helper to create simple alert dialog to display message
+	 * 
+	 * @param msg
+	 *            message to display in alert dialog
+	 * @return the alert dialog
+	 */
+	private AlertDialog createSimpleDialog(String msg) {
+		AlertDialog.Builder dialogBldr = new AlertDialog.Builder(getActivity());
+		dialogBldr.setMessage(msg);
+		dialogBldr.setNeutralButton(R.string.ok, null);
+		return dialogBldr.create();
+	}
+
+	/**
+	 * Asynchronous task to get a route between two endpoints. Displays progress
+	 * dialog while running in background.
+	 */
+	private class GetRouteTask extends AsyncTask<LatLon, Void, Trip> {
+		private ProgressDialog dialog = new ProgressDialog(getActivity());
+		private LatLon startPoint;
+		private LatLon endPoint;
+
+		@Override
+		protected void onPreExecute() {
+			translinkService.clearModel();
+			dialog.setMessage("Retrieving route...");
+			dialog.show();
+		}
+
+		@Override
+		protected Trip doInBackground(LatLon... routeEndPoints) {
+			//Local Variables
+			Waldo waldo = null;
+			Trip tripToTake;
+			int busNumber;
+			String strBusNumber;
+			BusRoute routeToTake = null;
+
+			//Initialize 
+			boolean walkingDistance = false; 
+			Set<BusStop> stopsAroundStart = new HashSet<BusStop>();
+			Set<BusStop> stopsAroundEnd = new HashSet<BusStop>();
+
+			Set<BusRoute> routesAroundEnd = new HashSet<BusRoute>();
+			Set<BusRoute> routesAroundStart = new HashSet<BusRoute>();
+
+			Set<BusRoute> commonRoutes = new HashSet<BusRoute>();
+			Set<BusRoute> finalRoutes = new HashSet<BusRoute>();
+
+			Set<BusStop> potentialStopsNearStart = new HashSet<BusStop>();
+			Set<BusStop> potentialStopsNearEnd = new HashSet<BusStop>();
+
+			Set<LatLon> potentialStopLocations = new HashSet<LatLon>();
+			Set<LatLon> potentialStopLocationsNearEnd = new HashSet<LatLon>();
+
+			List<Double> arrayOfDistanceNearStart = new ArrayList<Double>();
+			List<Double> arrayOfDistanceNearEnd = new ArrayList<Double>();
+
+			// The start and end point for the route
+			startPoint = routeEndPoints[0];
+			endPoint = routeEndPoints[1];
+
+			// Getting Bus information
+			BusStop startStop = null;
+			BusStop endStop = null;
+			//Getting Distance and Direction
+			String direction = null;
+			String NSdirection = null;
+			String EWdirection = null;
+
+			//User preferences for route type
+			String routingType = sharedPreferences.getString("routingOptions", "closest_stop_me");
+
+			//Converting Location to LatLon (start point)
+			Location userLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+			LatLon startPoint = new LatLon(userLocation.getLatitude(), userLocation.getLongitude());
+			//Get the location of Waldo (end point)
+			String name = waldo.getName();
+			Date lastUpdated = waldo.getLastUpdated();
+			LatLon lastLocation = waldo.getLastLocation();
+			Waldo waldo1 = new Waldo(name, lastUpdated, lastLocation);
+			LatLon endPoint = waldo1.getLastLocation();
+
+			//Converting distance to integer
+			String distance = sharedPreferences.getString("stopDistance", "500");
+			int radius = Integer.parseInt(distance);
+			//Create sets of nearby bus stops
+			stopsAroundStart = translinkService.getBusStopsAround(startPoint, radius);
+			System.out.println("Tunjay, Bus stops by the user = " + stopsAroundStart);
+			stopsAroundEnd = translinkService.getBusStopsAround(endPoint, radius);
+			System.out.println("Tunjay, Bus stops near the Waldo = " + stopsAroundEnd);    
+
+			for (BusStop busStopNearStart: stopsAroundStart) {
+
+				translinkService.getBusEstimatesForStop(busStopNearStart);
+
+				// Get Bus Stop number, Convert Number from integer to string, look up route to take based on the Number
+				busNumber = busStopNearStart.getNumber();
+				strBusNumber = Integer.toString(busNumber);
+				Set<Bus> busesToTake = translinkService.lookupRoute(strBusNumber).getBuses();
+
+				//See if the two sets have any stops in common, if yes user can walk to the selected Waldo
+				if (stopsAroundEnd.contains(busStopNearStart)) {
+					walkingDistance = true;
+					tripToTake = new Trip(null, null, null, null, true);
+					return tripToTake;
+				}
+				else {
+					for (Bus bus1 : busesToTake) {
+						double startStopLat = busStopNearStart.getLatLon().getLatitude();
+						double startStopLon = busStopNearStart.getLatLon().getLongitude();
+						double endStopLat = endStop.getLatLon().getLatitude();
+						double endStopLon = endStop.getLatLon().getLongitude();
+
+						if (endStopLat >startStopLat) {
+							NSdirection = "NORTH";
+						} else {
+							NSdirection = "SOUTH";
+						}
+						if (endStopLon > startStopLon) {
+							EWdirection = "WEST";
+						} else
+							EWdirection = "EAST";
+					}	
+				}
+				/**
+				 -find bus routes in common
+				 -eliminate ones going in direction
+				 -gives you final set of route
+				 -from this set, then use user setting
+				 --if it's closest to the A, find all stop that contain final route.
+				 (eliminate all wrong stops)
+				 -find the shortest one out of the set of stops.(final stop)
+				 -from this stop, find which route to take. stop.contains()
+				 -from point B, which stop contains this.
+				 **/
+			}
+			// For each bus stop near the end
+			for (BusStop busStopNearEnd1: stopsAroundEnd) {
+				// Get a set of Bus Routes
+				routesAroundEnd = busStopNearEnd1.getRoutes();
+				// For each bus route in the found set of routes
+				for (BusRoute busRouteNearEnd: routesAroundEnd) {
+					//Find if there are any common routes, and add it to the list of common routes
+					if (routesAroundStart.contains(busRouteNearEnd)) {
+						commonRoutes.add(busRouteNearEnd);
+					}
+					// For each common route found
+					for (BusRoute commonRoute: commonRoutes) {
+						// Get a set of potential Buses
+						Set<Bus> potentialBuses = commonRoute.getBuses();
+						// For each potential bus 
+						for (Bus potentialBus : potentialBuses) {
+							// Eliminate those going in wrong direction
+							String potentialBusDirection = potentialBus.getDirection();
+							if (!potentialBusDirection.equals(NSdirection) || !potentialBusDirection.equals(EWdirection)) {
+								potentialBuses.remove(potentialBus);
+							}
+							//Otherwise add the potential bus to the set of final routes
+							else { 
+								BusRoute finalRoute = null;
+								finalRoute.addBus(potentialBus);
+								finalRoutes.add(finalRoute);
+							}
+							//For each Route in the final set of routes
+							for (BusRoute eachRoute: finalRoutes) {
+								//If routing type is closest_stop_me, find the route that has a stop closest to User (by comparing LatLons)
+								if (routingType.equals("closest_stop_me")) {
+									potentialStopsNearStart = eachRoute.getStops();
+
+									//For each bus stop in the potential set of stops
+									for (BusStop aStop: potentialStopsNearStart) {
+										// Get the location
+										LatLon potentialStopLocationNearStart = aStop.getLatLon();
+										//Add this location to a set of locations 
+										potentialStopLocations.add(potentialStopLocationNearStart);
+										//For each location in the set of locations
+										for (LatLon eachStopLocationNearStart: potentialStopLocations) {
+											//Find the shortest distance between the user location and the stops
+											double distanceBetweenTwoLatLonNearStart;
+											distanceBetweenTwoLatLonNearStart = LatLon.distanceBetweenTwoLatLon(startPoint, eachStopLocationNearStart);
+											arrayOfDistanceNearStart.add(distanceBetweenTwoLatLonNearStart);
+											Double shortestDistanceNearStart = Collections.min(arrayOfDistanceNearStart);
+											
+											startStop = aStop;
+											Set<BusRoute> routesFromFinalStop = startStop.getRoutes();
+											for (BusRoute routeFromFinalStop : routesFromFinalStop) {
+												if (routesAroundEnd.contains(routeFromFinalStop)) {
+													routeToTake = routeFromFinalStop;
+												}
+											}
+										}
+									}
+								}
+								else if (routingType.equals("closest_stop_dest")) {
+									potentialStopsNearEnd = eachRoute.getStops();
+
+									//For each bus stop in the potential set of stops
+									for (BusStop bStop: potentialStopsNearEnd) {
+										// Get the location
+										LatLon potentialStopLocationNearEnd = bStop.getLatLon();
+										//Add this location to a set of locations 
+										potentialStopLocationsNearEnd.add(potentialStopLocationNearEnd);
+										//For each location in the set of locations
+										for (LatLon eachStopLocationNearEnd: potentialStopLocationsNearEnd) {
+											//Find the shortest distance between the user location and the stops
+											double distanceBetweenTwoLatLon;
+											distanceBetweenTwoLatLon = LatLon.distanceBetweenTwoLatLon(startPoint, eachStopLocationNearEnd);
+											arrayOfDistanceNearEnd.add(distanceBetweenTwoLatLon);
+											Double shortestDistance = Collections.min(arrayOfDistanceNearEnd);
+
+											endStop = bStop;
+											Set<BusRoute> routesFromFinalStop = endStop.getRoutes();
+											for (BusRoute routeFromFinalStop : routesFromFinalStop) {
+												if (routesAroundEnd.contains(routeFromFinalStop)) {
+													routeToTake = routeFromFinalStop;
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			System.out.println("Tunjayss = " + commonRoutes);
+			translinkService.parseKMZ(routeToTake);  // to get the segments of the route
+			tripToTake = new Trip(startStop, endStop, direction, routeToTake ,walkingDistance);
+			return tripToTake;
+		}
+
+		@Override
+		protected void onPostExecute(Trip trip) {
+			dialog.dismiss();
+
+			if (trip != null && !trip.inWalkingDistance()) {
+				// Remove previous start/end stops
+				busStopToBoardOverlay.removeAllItems();
+				busStopToDisembarkOverlay.removeAllItems();
+
+				// Removes all but the selected Waldo
+				waldosOverlay.removeAllItems();
+				List<Waldo> waldos = new ArrayList<Waldo>();
+				waldos.add(selectedWaldo);
+				plotWaldos(waldos);
+
+				// Plot the route
+				plotRoute(trip);
+
+				// Move map to the starting location
+				LatLon startPointLatLon = trip.getStart().getLatLon();
+				mapController.setCenter(new GeoPoint(startPointLatLon
+						.getLatitude(), startPointLatLon.getLongitude()));
+				mapView.invalidate();
+			} else if (trip != null && trip.inWalkingDistance()) {
+				AlertDialog dialog = createSimpleDialog("You are in walking distance!");
+				dialog.show();
+			} else {
+				AlertDialog dialog = createSimpleDialog("Unable to retrieve bus location info...");
+				dialog.show();
+			}
+		}
+	}
+
+	/**
+	 * Asynchronous task to initialize or re-initialize access to the Waldo web
+	 * service.
+	 */
+	private class InitWaldo extends AsyncTask<String, Void, Void> {
+
+		@Override
+		protected Void doInBackground(String... arg0) {
+
+			// Initialize the service passing the name of the Waldo to use. If
+			// you have
+			// passed an argument to this task, then it will be used as the
+			// name, otherwise
+			// nameToUse will be null
+			String nameToUse = arg0[0];
+			userName = waldoService.initSession(nameToUse);
+
+			return null;
+		}
+
+	}
+
+	/**
+	 * Asynchronous task to get Waldo points from Waldo web service. Displays
+	 * progress dialog while running in background.
+	 */
+	private class GetWaldoLocations extends
+	AsyncTask<Integer, Void, List<Waldo>> {
+		private ProgressDialog dialog = new ProgressDialog(getActivity());
+
+		@Override
+		protected void onPreExecute() {
+			dialog.setMessage("Retrieving locations of waldos...");
+			dialog.show();
+		}
+
+		@Override
+		protected List<Waldo> doInBackground(Integer... i) {
+			Integer numberOfWaldos = i[0];
+			return waldoService.getRandomWaldos(numberOfWaldos);
+		}
+
+		@Override
+		protected void onPostExecute(List<Waldo> waldos) {
+			dialog.dismiss();
+			if (waldos != null) {
+				plotWaldos(waldos);
+			}
+		}
+	}
+
+	/**
+	 * Asynchronous task to get messages from Waldo web service. Displays
+	 * progress dialog while running in background.
+	 */
+	private class GetMessagesFromWaldo extends
+	AsyncTask<Void, Void, List<String>> {
+
+		private ProgressDialog dialog = new ProgressDialog(getActivity());
+
+		@Override
+		protected void onPreExecute() {
+			dialog.setMessage("Retrieving messages for the user...");
+			dialog.show();
+		}
+
+		@Override
+		protected List<String> doInBackground(Void... params) {
+			return waldoService.getMessages();
+		}
+
+		@Override
+		protected void onPostExecute(List<String> messages) {
+			dialog.dismiss();
+			if (messages != null) {
+				AlertDialog dialog = createSimpleDialog(messages.toString());
+				dialog.show();
+			}  else {
+				AlertDialog dialog = createSimpleDialog("No Messages Available");
+				dialog.show();
+			}
+		}
+	}
+	/**
+	 * Determine the user location
+	 */
+
+	private class GPSTracker implements LocationListener {
+
+		@Override
+		public void onLocationChanged(Location location) {	
+			Location location1 = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+			updateLocation(location1);
+		}
+
+		@Override
+		public void onProviderDisabled(String provider) {
+		}
+
+		@Override
+		public void onProviderEnabled(String provider) {
+		}
+
+		@Override
+		public void onStatusChanged(String provider, int status, Bundle extras) {
+		}
+	}
+}
